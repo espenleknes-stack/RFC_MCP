@@ -141,6 +141,10 @@ npm run pack:check
 Logs go to stderr as one JSON object per event: tool, function module, outcome, cause and duration.
 Parameters, rows and credentials are never logged.
 
+## License
+
+Licensed under the [Apache License 2.0](LICENSE), the same license as `open-rfc`.
+
 ## Trademarks
 
 SAP, ABAP, SAP ECC, SAP S/4HANA and SAP NetWeaver are trademarks or registered trademarks of SAP SE
