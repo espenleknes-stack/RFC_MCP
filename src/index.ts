@@ -9,6 +9,16 @@ import { buildServer } from './server.js';
 const log = (event: Record<string, unknown>) => process.stderr.write(`${JSON.stringify({ source: 'rfc-mcp', ...event })}\n`);
 
 try {
+  // Optional: read the connection from a local env file so the password stays out of the MCP host's
+  // configuration. Variables already set in the environment win over the file.
+  const envFile = process.env.RFC_MCP_ENV_FILE;
+  if (envFile) {
+    try {
+      process.loadEnvFile(envFile);
+    } catch {
+      throw new PolicyError('invalid_config', 'RFC_MCP_ENV_FILE could not be read.');
+    }
+  }
   const policy = loadPolicy(process.env);
   await buildServer({ policy, connect: openRfcConnect(policy), log }).connect(new StdioServerTransport());
   log({ outcome: 'started', extendedFunctions: policy.extendedFunctions.size, tableList: policy.tables !== null });

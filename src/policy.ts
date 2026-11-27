@@ -29,6 +29,8 @@ export const FIXED_READ_FUNCTIONS: Readonly<Record<string, string>> = {
 /** Used by this server's own tools. Never callable by name, so the table gate cannot be bypassed. */
 export const TABLE_READER = 'RFC_READ_TABLE';
 export const INTERFACE_READER = 'RFC_GET_FUNCTION_INTERFACE';
+/** Read-only BAPI behind SalesOrderDetails. Called only with fixed views; never the credit-card view. */
+export const SALES_ORDER_READER = 'BAPISDORDER_GETDETAILEDLIST';
 
 /**
  * Never callable, whatever the operator lists. Code and OS execution, user administration, commits,
@@ -101,6 +103,18 @@ export function isSensitiveTable(name: string): boolean {
   return SENSITIVE_TABLES.has(name) || SENSITIVE_TABLE_PATTERNS.some((pattern) => pattern.test(name));
 }
 
+/** ISO 639-1 to SAP's one-character language key (T002), for parameters and fields typed SPRAS/LANGU. */
+const SAP_LANGUAGE_KEYS: Readonly<Record<string, string>> = {
+  EN: 'E', DE: 'D', FR: 'F', ES: 'S', IT: 'I', NL: 'N', PT: 'P', DA: 'K', SV: 'V', NO: 'O', FI: 'U',
+  PL: 'L', CS: 'C', SK: 'Q', HU: 'H', RU: 'R', TR: 'T', EL: 'G', JA: 'J', ZH: '1', KO: '3', ET: '9',
+  LV: 'Y', LT: 'X', SL: '5', HR: '6', RO: '4', BG: 'W', UK: '8', SR: '0', AR: 'A', HE: 'B', TH: '2',
+};
+
+export function sapLanguageKey(language: string): string {
+  const value = language.trim().toUpperCase();
+  return value.length === 1 ? value : (SAP_LANGUAGE_KEYS[value] ?? value.slice(0, 1));
+}
+
 export interface RfcConnection {
   ashost: string;
   sysnr: string;
@@ -108,6 +122,8 @@ export interface RfcConnection {
   user: string;
   passwd: string;
   lang: string;
+  /** SAProuter route prefix, for example /H/router.example.com. The application server is resolved by the router. */
+  saprouter?: string;
 }
 
 export interface Policy {
@@ -142,7 +158,9 @@ function bounded(env: Env, key: string, fallback: number, max: number): number {
 }
 
 /** Reads the whole configuration once at startup. Throws before any connection is attempted. */
-export function loadPolicy(env: Env): Policy {
+export function loadPolicy(rawEnv: Env): Policy {
+  // Values from an env file or a client config often carry stray spaces; SAP never wants them.
+  const env: Env = Object.fromEntries(Object.entries(rawEnv).map(([key, value]) => [key, key === 'SAP_PASSWORD' ? value : value?.trim()]));
   if (env.RFC_MCP_ENABLED !== 'true')
     throw new PolicyError('disabled', 'RFC access is off. Set RFC_MCP_ENABLED=true for this system to enable it.');
   const required = ['SAP_RFC_ASHOST', 'SAP_CLIENT', 'SAP_USER', 'SAP_PASSWORD'] as const;
@@ -151,6 +169,13 @@ export function loadPolicy(env: Env): Policy {
   const sysnr = (env.SAP_RFC_SYSNR ?? '00').padStart(2, '0');
   if (!/^\d{2}$/.test(sysnr)) throw new PolicyError('invalid_config', 'SAP_RFC_SYSNR must be one or two digits.');
   if (!/^\d{3}$/.test(env.SAP_CLIENT!)) throw new PolicyError('invalid_config', 'SAP_CLIENT must be three digits.');
+  // SAP GUI writes the router as /H/router; open-rfc wants the prefix ready for the gateway, /H/router/H/.
+  let saprouter = env.SAP_RFC_SAPROUTER;
+  if (saprouter) {
+    if (!/^(\/[HSW]\/[^/\s]+)+(\/H\/)?$/.test(saprouter))
+      throw new PolicyError('invalid_config', 'SAP_RFC_SAPROUTER must be a route string such as /H/router.example.com or /H/router/S/3299.');
+    if (!saprouter.endsWith('/H/')) saprouter = `${saprouter}/H/`;
+  }
 
   const extendedFunctions = new Set<string>();
   for (const entry of list(env.RFC_MCP_EXTENDED_FUNCTIONS)) {
@@ -177,6 +202,7 @@ export function loadPolicy(env: Env): Policy {
       user: env.SAP_USER!,
       passwd: env.SAP_PASSWORD!,
       lang: env.SAP_LANGUAGE ?? 'EN',
+      ...(saprouter ? { saprouter } : {}),
     },
     timeoutSeconds: bounded(env, 'RFC_MCP_TIMEOUT_SECONDS', 25, 300),
     maxRows: bounded(env, 'RFC_MCP_MAX_ROWS', 200, ROW_CEILING),

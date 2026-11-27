@@ -7,6 +7,7 @@ import {
   assertReadableTable,
   isDeniedFunction,
   loadPolicy,
+  sapLanguageKey,
 } from '../src/policy.js';
 import { env } from './env.js';
 
@@ -47,6 +48,23 @@ describe('startup configuration', () => {
     expect(code(() => loadPolicy({ ...env, RFC_MCP_TIMEOUT_SECONDS: '0' }))).toBe('invalid_config');
     expect(code(() => loadPolicy({ ...env, SAP_CLIENT: '10' }))).toBe('invalid_config');
     expect(code(() => loadPolicy({ ...env, SAP_RFC_SYSNR: 'A0' }))).toBe('invalid_config');
+  });
+
+  it('trims stray spaces from an env file but never from the password', () => {
+    const policy = loadPolicy({ ...env, SAP_CLIENT: ' 200 ', SAP_RFC_ASHOST: 'ecc.example.test ', SAP_PASSWORD: ' pass ' });
+    expect(policy.connection).toMatchObject({ client: '200', ashost: 'ecc.example.test', passwd: ' pass ' });
+  });
+
+  it('accepts a SAProuter string in SAP GUI form and completes it for the gateway hop', () => {
+    expect(loadPolicy({ ...env, SAP_RFC_SAPROUTER: '/H/203.0.113.10' }).connection.saprouter).toBe('/H/203.0.113.10/H/');
+    expect(loadPolicy({ ...env, SAP_RFC_SAPROUTER: '/H/router/S/3299/H/' }).connection.saprouter).toBe('/H/router/S/3299/H/');
+    expect(loadPolicy(env).connection.saprouter).toBeUndefined();
+    expect(code(() => loadPolicy({ ...env, SAP_RFC_SAPROUTER: 'router.example.com' }))).toBe('invalid_config');
+    expect(code(() => loadPolicy({ ...env, SAP_RFC_SAPROUTER: '/H/router/P/secret' }))).toBe('invalid_config');
+  });
+
+  it("maps the logon language to SAP's one-character key", () => {
+    expect(['EN', 'de', 'NO', 'E', 'ZH'].map(sapLanguageKey)).toEqual(['E', 'D', 'O', 'E', '1']);
   });
 
   it('will not start with a denied function module or a sensitive table enabled', () => {

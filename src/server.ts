@@ -1,5 +1,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { FIXED_READ_FUNCTIONS } from './policy.js';
+import {
+  customerSearch,
+  customerSearchSchema,
+  salesOrderDetails,
+  salesOrderDetailsSchema,
+  salesOrderSearch,
+  salesOrderSearchSchema,
+} from './sales.js';
 import { callExtended, callFixed, callSchema, describeFunction, describeSchema, readTable, readTableSchema, type ToolContext } from './tools.js';
 
 export const SERVER_VERSION = '0.1.0';
@@ -42,6 +50,36 @@ export function buildServer(ctx: ToolContext): McpServer {
       annotations: { readOnlyHint: true },
     },
     (args) => callFixed(ctx, args)
+  );
+  server.registerTool(
+    'CustomerSearch',
+    {
+      description:
+        'Find SAP customers (KNA1) by part of the name, customer number, city, postal code or country, optionally only those set up in one sales organization. Returns number, name, address, VAT number and blocks.',
+      inputSchema: customerSearchSchema.shape,
+      annotations: { readOnlyHint: true },
+    },
+    (args) => customerSearch(ctx, args)
+  );
+  server.registerTool(
+    'SalesOrderSearch',
+    {
+      description:
+        "Find SAP sales orders (VBAK) by sold-to customer, the customer's purchase order number, order number, material, sales area, order type or document date range. Returns each order's type, dates, customer and name, PO number, net value and blocks, newest first. Use SalesOrderDetails for one order's items, prices and logistics.",
+      inputSchema: salesOrderSearchSchema.shape,
+      annotations: { readOnlyHint: true },
+    },
+    (args) => salesOrderSearch(ctx, args)
+  );
+  server.registerTool(
+    'SalesOrderDetails',
+    {
+      description:
+        'Read one SAP sales order in full: header, status, terms (incoterms, payment terms, shipping conditions), partners with addresses, items with net price and value, pricing conditions per item, schedule lines with confirmed quantities and dates, plant, shipping point, route, weights, and the deliveries and invoices that followed, with goods issue dates.',
+      inputSchema: salesOrderDetailsSchema.shape,
+      annotations: { readOnlyHint: true },
+    },
+    (args) => salesOrderDetails(ctx, args)
   );
   if (ctx.policy.extendedFunctions.size > 0)
     server.registerTool(

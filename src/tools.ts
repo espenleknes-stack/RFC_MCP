@@ -9,6 +9,7 @@ import {
   assertReadableTable,
   isDeniedFunction,
   normalizeName,
+  sapLanguageKey,
   type Policy,
 } from './policy.js';
 import { classifyError, type Connect, type RfcParameters } from './rfc.js';
@@ -106,10 +107,109 @@ async function run(
   }
 }
 
+export type Caller = (functionName: string, parameters: RfcParameters) => Promise<Record<string, unknown>>;
+
+/**
+ * Like `run`, for a tool that needs several function modules in one logon (a search and then the
+ * names that go with it). `prepare` validates everything it can before a connection is opened; a
+ * PolicyError thrown by `work` after the first call is reported as dispatched.
+ */
+export async function runSession<T>(
+  ctx: ToolContext,
+  tool: string,
+  prepare: () => T,
+  work: (call: Caller, prepared: T) => Promise<unknown>
+): Promise<ToolResult> {
+  let prepared: T;
+  try {
+    prepared = prepare();
+  } catch (error) {
+    if (!(error instanceof PolicyError)) throw error;
+    ctx.log({ tool, outcome: 'refused', code: error.code });
+    return refusal(error.code, `${error.message} Nothing was sent to SAP.`, false);
+  }
+  const started = Date.now();
+  const secrets = [ctx.policy.connection.passwd];
+  const functions: string[] = [];
+  let session;
+  try {
+    session = await ctx.connect();
+  } catch (error) {
+    const cause = classifyError(error, secrets);
+    ctx.log({ tool, outcome: 'connect_failed', blocker: cause.blocker, ms: Date.now() - started });
+    return refusal('rfc_connect_failed', 'Could not log on to the SAP system over RFC.', false, { blocker: cause.blocker, key: cause.key, detail: cause.message });
+  }
+  const call: Caller = async (functionName, parameters) => {
+    if (Buffer.byteLength(JSON.stringify(parameters)) > MAX_INPUT_BYTES) throw new PolicyError('input_too_large', 'Parameters exceed 60 KB.');
+    functions.push(functionName);
+    return session.call(functionName, parameters);
+  };
+  try {
+    const value = await work(call, prepared);
+    ctx.log({ tool, functions, outcome: 'ok', ms: Date.now() - started });
+    return ok(value);
+  } catch (error) {
+    if (error instanceof PolicyError) {
+      ctx.log({ tool, functions, outcome: 'refused', code: error.code });
+      return refusal(error.code, error.message, functions.length > 0);
+    }
+    const cause = classifyError(error, secrets);
+    ctx.log({ tool, functions, outcome: 'failed', blocker: cause.blocker, ms: Date.now() - started });
+    return refusal('rfc_call_failed', 'SAP did not complete the call.', functions.length > 0, {
+      blocker: cause.blocker,
+      key: cause.key,
+      detail: cause.message,
+      functionName: functions.at(-1),
+    });
+  } finally {
+    try {
+      await session.close();
+    } catch {
+      ctx.log({ tool, outcome: 'close_failed' });
+    }
+  }
+}
+
 const DIRECTIONS: Readonly<Record<string, string>> = { I: 'import', E: 'export', C: 'changing', T: 'tables', X: 'exception' };
-const rows = (value: unknown): Array<Record<string, unknown>> =>
+export const rows = (value: unknown): Array<Record<string, unknown>> =>
   Array.isArray(value) ? value.filter((row): row is Record<string, unknown> => !!row && typeof row === 'object') : [];
-const str = (value: unknown): string => (typeof value === 'string' ? value.trim() : value == null ? '' : String(value));
+export const str = (value: unknown): string => (typeof value === 'string' ? value.trim() : value == null ? '' : String(value));
+
+/** Slices RFC_READ_TABLE's fixed-width rows by the returned offsets; a delimiter would be ambiguous. */
+export function parseReadTable(result: Record<string, unknown>): { fields: string[]; rows: Array<Record<string, string>> } {
+  const layout = rows(result.FIELDS).map((field) => ({
+    name: str(field.FIELDNAME),
+    offset: Number(field.OFFSET),
+    length: Number(field.LENGTH),
+  }));
+  if (layout.some((field) => !field.name || !Number.isInteger(field.offset) || !Number.isInteger(field.length)))
+    throw new PolicyError('unreadable_result', 'SAP returned a field layout this server cannot interpret.');
+  const data = rows(result.DATA).map((row) => {
+    const line = typeof row.WA === 'string' ? row.WA : '';
+    return Object.fromEntries(layout.map((field) => [field.name, line.slice(field.offset, field.offset + field.length).trimEnd()]));
+  });
+  return { fields: layout.map((field) => field.name), rows: data };
+}
+
+/**
+ * One RFC_READ_TABLE call for a server-built selection. The table still passes the sensitive-table
+ * denylist and the operator's table list, so a purpose-built tool cannot reach more than RfcReadTable.
+ */
+export async function selectRows(
+  call: Caller,
+  policy: Policy,
+  query: { table: string; fields: readonly string[]; where?: string; maxRows?: number }
+): Promise<Array<Record<string, string>>> {
+  const table = assertReadableTable(policy, query.table);
+  const result = await call(TABLE_READER, {
+    QUERY_TABLE: table,
+    ROWCOUNT: Math.min(query.maxRows ?? policy.maxRows, policy.maxRows),
+    ROWSKIPS: 0,
+    FIELDS: query.fields.map((field) => ({ FIELDNAME: normalizeName(field, 'Field') })),
+    OPTIONS: query.where ? splitWhere(query.where) : [],
+  });
+  return parseReadTable(result).rows;
+}
 
 export function describeFunction(ctx: ToolContext, args: z.infer<typeof describeSchema>): Promise<ToolResult> {
   let name = '';
@@ -118,7 +218,7 @@ export function describeFunction(ctx: ToolContext, args: z.infer<typeof describe
     'RfcDescribeFunction',
     () => {
       name = normalizeName(args.function, 'Function module');
-      return { functionName: INTERFACE_READER, parameters: { FUNCNAME: name, LANGUAGE: ctx.policy.connection.lang.slice(0, 2) } };
+      return { functionName: INTERFACE_READER, parameters: { FUNCNAME: name, LANGUAGE: sapLanguageKey(ctx.policy.connection.lang) } };
     },
     (result) => ({
       function: name,
@@ -190,19 +290,8 @@ export function readTable(ctx: ToolContext, args: z.infer<typeof readTableSchema
       };
     },
     (result) => {
-      // Fixed-width slicing by the returned offsets: a delimiter would be ambiguous inside the data.
-      const layout = rows(result.FIELDS).map((field) => ({
-        name: str(field.FIELDNAME),
-        offset: Number(field.OFFSET),
-        length: Number(field.LENGTH),
-      }));
-      if (layout.some((field) => !field.name || !Number.isInteger(field.offset) || !Number.isInteger(field.length)))
-        throw new PolicyError('unreadable_result', 'SAP returned a field layout this server cannot interpret.');
-      const data = rows(result.DATA).map((row) => {
-        const line = typeof row.WA === 'string' ? row.WA : '';
-        return Object.fromEntries(layout.map((field) => [field.name, line.slice(field.offset, field.offset + field.length).trimEnd()]));
-      });
-      return { table, fields: layout.map((field) => field.name), rowCount: data.length, moreRowsPossible: data.length >= limit, rows: data };
+      const { fields, rows: data } = parseReadTable(result);
+      return { table, fields, rowCount: data.length, moreRowsPossible: data.length >= limit, rows: data };
     }
   );
 }

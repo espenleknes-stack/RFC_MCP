@@ -53,8 +53,8 @@ function harness(extra: Record<string, string> = {}, replies: Record<string, Rep
 const sapError = (key: string, message: string) => Object.assign(new Error(message), { key });
 
 describe('tool surface', () => {
-  it('advertises the three read tools, and the extended tool only when the operator enabled something', async () => {
-    expect(await harness().tools()).toEqual(['RfcDescribeFunction', 'RfcReadTable', 'RfcCall']);
+  it('advertises the read tools, and the extended tool only when the operator enabled something', async () => {
+    expect(await harness().tools()).toEqual(['RfcDescribeFunction', 'RfcReadTable', 'RfcCall', 'CustomerSearch', 'SalesOrderSearch', 'SalesOrderDetails']);
     expect(await harness({ RFC_MCP_EXTENDED_FUNCTIONS: 'BAPI_MATERIAL_GET_DETAIL' }).tools()).toContain('RfcCallExtended');
   });
 });
@@ -203,7 +203,7 @@ describe('RfcDescribeFunction', () => {
       }
     );
     const { body } = await sap.call('RfcDescribeFunction', { function: 'bapi_material_get_detail' });
-    expect(sap.calls[0]).toEqual({ functionName: 'RFC_GET_FUNCTION_INTERFACE', parameters: { FUNCNAME: 'BAPI_MATERIAL_GET_DETAIL', LANGUAGE: 'EN' } });
+    expect(sap.calls[0]).toEqual({ functionName: 'RFC_GET_FUNCTION_INTERFACE', parameters: { FUNCNAME: 'BAPI_MATERIAL_GET_DETAIL', LANGUAGE: 'E' } });
     expect(body).toEqual({
       function: 'BAPI_MATERIAL_GET_DETAIL',
       callableWith: 'RfcCallExtended',

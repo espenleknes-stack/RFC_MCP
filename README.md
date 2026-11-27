@@ -21,8 +21,9 @@ affiliated with or endorsed by SAP SE.
 
 ## Status
 
-Built and unit-tested against a scripted SAP. **It has not yet been run against a real SAP system.**
-Make the first live call `RFC_SYSTEM_INFO` on a non-productive client.
+Unit-tested against a scripted SAP, and run against a real SAP ECC 6.0 system (NetWeaver 7.50, SAP
+HANA database, Unicode) through a SAProuter. Make the first live call `RFC_SYSTEM_INFO` on a
+non-productive client.
 
 ## Tools
 
@@ -31,6 +32,9 @@ Make the first live call `RFC_SYSTEM_INFO` on a non-productive client.
 | `RfcDescribeFunction` | The interface of any function module: parameters, types, and which tool can call it | read |
 | `RfcReadTable` | Rows of one table through `RFC_READ_TABLE`, with named fields, an Open SQL selection, a row cap and paging | read |
 | `RfcCall` | A fixed set of read-only function modules: `RFC_SYSTEM_INFO`, `/SDF/UPL_SYSTEM_STATUS`, `SCMON_GET_LOG_STATUS`, `SWNC_GET_DIRECTORY_FRAME`, `RPY_PROGRAM_READ`, `RFC_READ_REPORT` | read |
+| `CustomerSearch` | Customers (`KNA1`) by part of the name in any case, number, city, postal code or country, optionally only those in one sales organization (`KNVV`) | read |
+| `SalesOrderSearch` | Sales orders (`VBAK`, `VBAP` for a material) by sold-to, customer PO number, order number, material, sales area, order type or document date. Newest first, with the customer's name | read |
+| `SalesOrderDetails` | One sales order through `BAPISDORDER_GETDETAILEDLIST`: header, status, terms, partners and addresses, items with net price, pricing conditions, schedule lines, plant, shipping point, route and weights, plus deliveries (`LIKP`), shipments (`VTTK`) and the document flow | read |
 | `RfcCallExtended` | Function modules you list in `RFC_MCP_EXTENDED_FUNCTIONS`, for example a BAPI. Not advertised when the list is empty | require an approval for every call |
 
 Three guardrails are enforced in [`src/policy.ts`](src/policy.ts), whatever the SAP user is
@@ -45,6 +49,10 @@ authorized for:
    only named tables.
 3. **Off by default.** The process exits unless `RFC_MCP_ENABLED=true`.
 
+The three sales tools read tables only through the same gate as `RfcReadTable`, so the sensitive-table
+list and `RFC_MCP_TABLES` apply to them too. `SalesOrderDetails` never requests the BAPI's credit-card
+view, and returns only the fields it maps, never the raw BAPI result.
+
 Never callable, even if listed: `RFC_ABAP_INSTALL_AND_RUN`, `RFC_REMOTE_*`, `SXPG_*` (operating
 system commands), `BAPI_USER_*` and `SUSR_*` (user administration), `BAPI_TRANSACTION_COMMIT`, and
 every generic table reader. The server refuses to start with one of them, or with a sensitive table,
@@ -54,7 +62,9 @@ in its configuration.
 
 - **No transport encryption.** Classic RFC without SNC sends the password and the data in clear
   text. Run the server on a trusted private network next to the SAP system, never across an
-  untrusted one. `open-rfc` does not support SNC, X.509, SAProuter or message-server logon.
+  untrusted one. `open-rfc` does not support SNC, X.509 or message-server logon. A SAProuter route
+  is an `open-rfc` preview, not part of its supported beta: it works with this server, but does not
+  add encryption.
 - **Release band.** `open-rfc` 0.2.6 is beta, qualified by its author on SAP NetWeaver 7.50 and SAP
   S/4HANA 2023. ECC 6.0 EHP8 runs on 7.50. Older ECC releases and non-Unicode systems are untested
   or unsupported. Check the `open-rfc` documentation for the current support boundary.
@@ -88,6 +98,7 @@ npm run build
 | `RFC_MCP_ENABLED` | yes | Must be exactly `true` |
 | `SAP_RFC_ASHOST` | yes | Application server host |
 | `SAP_RFC_SYSNR` | no | System number, default `00` (gateway port `33NN`) |
+| `SAP_RFC_SAPROUTER` | no | SAProuter string as SAP GUI shows it, for example `/H/203.0.113.10`. The application server is then resolved by the router |
 | `SAP_CLIENT` | yes | Three-digit client |
 | `SAP_USER`, `SAP_PASSWORD` | yes | Technical RFC user. Take the password from a secret store, not a committed file |
 | `SAP_LANGUAGE` | no | Default `EN` |
@@ -95,9 +106,16 @@ npm run build
 | `RFC_MCP_TABLES` | no | Comma-separated tables. When set, only these are readable |
 | `RFC_MCP_MAX_ROWS` | no | Row ceiling per table read, default 200, at most 5000 |
 | `RFC_MCP_TIMEOUT_SECONDS` | no | Per-call timeout, default 25 |
+| `RFC_MCP_ENV_FILE` | no | Path to a `KEY=value` file with any of the variables above, so the password stays out of the MCP client's configuration. Variables set in the environment win over the file |
 
 Give the SAP user `S_RFC` for the function groups it calls and `S_TABU_DIS` (or `S_TABU_NAM`) for
 the tables it reads, and no more than the tools are meant to reach.
+
+The sales tools additionally need `S_RFC` for `BAPISDORDER_GETDETAILEDLIST` (function group `2032`),
+display authorization for sales documents (`V_VBAK_VKO`, `V_VBAK_AAT`), and table read access to
+`KNA1`, `KNVV`, `VBAK`, `VBAP`, `LIKP`, `VTTK` and the text tables `T685T`, `TVZBT`, `TVSBT`,
+`TINCT`, `TVROT`, `T001W`, `TVAGT` and `DD07T`. If a text table is not readable, the codes are
+returned without their names and the result says which lookup failed.
 
 ## Use it from an MCP client
 
@@ -127,8 +145,22 @@ A good first conversation: ask for the system information (`RfcCall` with `RFC_S
 describe a function module with `RfcDescribeFunction` before calling it. Parameter names are
 case-sensitive and follow the function module's interface.
 
+With a local env file instead of credentials in the client configuration:
+
+```json
+{
+  "mcpServers": {
+    "sap-ecc-rfc": {
+      "command": "node",
+      "args": ["/absolute/path/to/RFC_MCP/dist/index.js"],
+      "env": { "RFC_MCP_ENV_FILE": "/absolute/path/to/rfc-mcp.env" }
+    }
+  }
+}
+```
+
 Configure your MCP host to ask for approval before `RfcCallExtended`. The server marks it with
-`readOnlyHint: false`; the three other tools carry `readOnlyHint: true`.
+`readOnlyHint: false`; every other tool carries `readOnlyHint: true`.
 
 ## Development
 
